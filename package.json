@@ -1,0 +1,14 @@
+{
+  "devDependencies": {
+    "typescript": "^5.6.2"
+  },
+  "dependencies": {
+    "@project-serum/anchor": "^0.26.0",
+    "@raydium-io/raydium-sdk": "^1.3.1-beta.58",
+    "@solana/web3.js": "^1.95.3",
+    "bs58": "^6.0.0",
+    "dotenv": "^16.4.5",
+    "pumpdotfun-sdk": "^1.3.2",
+    "ts-node": "^10.9.2"
+  }
+}
