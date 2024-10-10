@@ -9,6 +9,6 @@
       "skipLibCheck": true,
       "allowSyntheticDefaultImports": true
     },
-    "include": ["newcode.ts"]
+    "include": ["sniper.ts"]
   }
   

@@ -1,341 +1,330 @@
+// Import packages 
 import {
-    Connection,
-    PublicKey,
-    Keypair,
-    LAMPORTS_PER_SOL,
-  } from "@solana/web3.js";
-  import { PumpFunSDK, PriorityFee } from "pumpdotfun-sdk";
-  import { AnchorProvider, Wallet } from "@coral-xyz/anchor";
-  import bs58 from "bs58";
-  import { getMint } from "@solana/spl-token";
-  
-  // Create a Keypair from private key
-  const userPrivateKey = bs58.decode(
-    "PRIVATE_KEY_HERE" 
-  );
-  const userKeypair = Keypair.fromSecretKey(new Uint8Array(userPrivateKey));
-  const userPublicKey = userKeypair.publicKey.toBase58();
-  const wallet = new Wallet(userKeypair);
-  console.log("Public Key:", userPublicKey);
-  
-  // Connecting to Solana mainnet via Helius RPC
-  const connection = new Connection(
-    "HELIUS_API_KEY_HERE" 
-  );
-  
-  // Create Provider instance
-  const provider = new AnchorProvider(connection, wallet, {
-    commitment: "processed", //to maximize speed
-  });
-  
-  // Create PumpFun SDK instance
-  const sdk = new PumpFunSDK(provider);
-  
-  // Constants
-  const BUY_AMOUNT = 2_000_000n; // Amount in lamports (0.002 SOL)
-  const SLIPPAGE = 200n; // Slippage in basis points
-  const TAKE_PROFIT_PERCENTAGE = 20; // 20% profit
-  const STOP_LOSS_PERCENTAGE = 10; // 10% loss
-  
-  // Define the priority fee (0.002 SOL)
-  const PRIORITY_FEE: PriorityFee = {
-    unitLimit: 1_000_000, // Compute units
-    unitPrice: 2, // Lamports per unit
-  };
-  
-  // Interface for tokens being traded
-  interface TradedToken {
-    mintAddress: string;
-    buyPrice: number;      // Price at which the token was bought (in SOL per token)
-    amountBought: bigint;  // Amount of tokens bought
-  }
-  
-  // List to keep track of tokens being traded
-  let tradedTokens: TradedToken[] = [];
-  
-  // Function to start monitoring for new token mints using event listener
-  const startMonitoringTokenMints = () => {
-    const createEventListenerId = sdk.addEventListener(
-      "createEvent",
-      async (event) => {
-        console.log("Create Event Detected");
-        const mintPublicKey = event.mint; 
-        const mintAddress = mintPublicKey.toBase58();
-        console.log("Mint Address:", mintAddress);
-  
-        // Buy the token immediately
-        await buyToken(mintAddress);
-      }
-    );
-  
-    console.log("Create Event Listener ID:", createEventListenerId);
-  };
-  
-  // Function to buy a token
-  async function buyToken(mintAddress: string) {
+  PublicKey,
+  Connection,
+  Logs,
+  ParsedTransactionWithMeta,
+  Keypair,
+  Transaction,
+  TransactionInstruction,
+  SystemProgram,
+  SYSVAR_RENT_PUBKEY,
+} from "@solana/web3.js";
+import bs58 from "bs58";
+import { Idl } from "@project-serum/anchor";
+import * as anchor from "@project-serum/anchor";
+import idl from "./pump_fun_idl.json"; 
+import {
+  TOKEN_PROGRAM_ID,
+  ASSOCIATED_TOKEN_PROGRAM_ID,
+  getAssociatedTokenAddress,
+  createAssociatedTokenAccountInstruction,
+} from "@solana/spl-token";
+import fs from "fs";
+import path from "path";
+
+// PumpFun program ID
+const programId = new PublicKey("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P");
+
+// Private key for keypair generation
+const userPrivateKeyBase58 = "PRIVATE_KEY";
+const userPrivateKey = bs58.decode(userPrivateKeyBase58);
+const userKeypair = Keypair.fromSecretKey(userPrivateKey);
+
+// Buying Constants
+const PUMP_PROGRAM = new PublicKey("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P");
+const PUMP_GLOBAL = new PublicKey("4wTV1YmiEkRvAtNtsSGPtUrqRYQMe5SKy2uB4Jjaxnjf");
+const PUMP_EVENT_AUTHORITY = new PublicKey("Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1");
+const PUMP_FEE = new PublicKey("CebN5WGQ4jvEPvsVU4EoHEpgzq1VV7AbicfhtW4xC9iM");
+const SYSTEM_PROGRAM = SystemProgram.programId;
+const SYSTEM_RENT = SYSVAR_RENT_PUBKEY;
+const LAMPORTS_PER_SOL = 1_000_000_000;
+
+// Helius RPC endpoint to make connection
+const connection = new Connection(
+  "HELIUS_ENDPOINT"
+);
+
+// User-specified folder path for logs
+const logFolderPath = '/Users/Logs'; // Replace with your desired folder path
+
+// log file paths
+const timestamp = new Date().toISOString().replace(/[:.]/g, '-'); 
+const logFileName = `transaction_logs_${timestamp}.csv`;
+const logFilePath = path.join(logFolderPath, logFileName);
+
+// Function to aggressively fetch a transaction
+const aggressivelyGetTransaction = async (
+  signature: string,
+  maxAttempts: number = 1000
+): Promise<ParsedTransactionWithMeta | null> => {
+  let attempts = 0;
+  while (attempts < maxAttempts) {
+    attempts++;
     try {
-      const mintPublicKey = new PublicKey(mintAddress);
-  
-      // Attempt to buy the token
-      const txResult = await sdk.buy(
-        userKeypair,
-        mintPublicKey,
-        BUY_AMOUNT,
-        SLIPPAGE,
-        PRIORITY_FEE
-      );
-      console.log(
-        `Successfully bought token ${mintAddress}. Transaction Result:`,
-        txResult
-      );
-  
-      // Extract the transaction signature
-      const txId = txResult.signature;
-  
-      if (!txId) {
-        console.error('Transaction signature not found in txResult.');
-        return;
-      }
-  
-      // Wait for the transaction to be confirmed
-      await connection.confirmTransaction(txId, "finalized");
-  
-      // Fetch the transaction details to determine the amount of tokens received
-      const transaction = await connection.getParsedTransaction(txId, {
+      const tx = await connection.getParsedTransaction(signature, {
+        commitment: "confirmed",
         maxSupportedTransactionVersion: 0,
-        commitment: "finalized",
       });
-  
-      if (!transaction) {
-        console.error(`Failed to fetch transaction details for ${txId}`);
-        return;
+
+      if (tx !== null) {
+        console.log(`Transaction found after ${attempts} attempts.`);
+        return tx;
       }
-  
-      // Determine the amount of tokens received
-      const amountBought = await getAmountBoughtFromTransaction(
-        transaction,
-        mintPublicKey,
-        userPublicKey
-      );
-  
-      if (amountBought === null) {
-        console.error(`Failed to determine amount bought for ${mintAddress}`);
-        return;
-      }
-  
-      // Get the buy price per token
-      const buyPrice = await getTokenPrice(sdk, connection, mintPublicKey);
-  
-      if (buyPrice !== null) {
-        // Add the token to the tradedTokens list with the amount bought
-        tradedTokens.push({
-          mintAddress,
-          buyPrice,
-          amountBought,
-        });
-  
+
+      if (attempts % 100 === 0) {
         console.log(
-          `Monitoring token ${mintAddress} for profit/loss targets.`
+          `Attempt ${attempts}: Transaction not available yet. Continuing...`
         );
-      } else {
-        console.log(`Could not retrieve price for token ${mintAddress}.`);
       }
     } catch (error) {
-      console.error(`Error buying token ${mintAddress}:`, error);
+      console.error(`Error fetching transaction on attempt ${attempts}:`, error);
     }
   }
+
+  console.error(`Failed to fetch transaction after ${maxAttempts} attempts.`);
+  return null;
+};
+
+// Function to write logs to a CSV file
+const logTransaction = (
+  logFilePath: string, 
+  mintAddress: string,
+  buyTransactionLink: string,
+  sellTransactionLink: string,
+  latencyMintToDetection: number,
+  latencyDetectionToRetrieval: number,
+  latencyRetrievalToSend: number,
+  totalBuyLatency: number,
+  latencyBuyToSell: number,
+  totalLatency: number
+) => {
+  const headers = 'Mint Address,Buy Transaction Link,Sell Transaction Link,Mint to Detection Latency (ms),Detection to Retrieval Latency (ms),Retrieval to Send (Buy) Latency (ms),Total Buy Latency (ms),Latency Buy to Sell (ms),Total Latency (ms)\n';
+  const logEntry = `${mintAddress},${buyTransactionLink},${sellTransactionLink},${latencyMintToDetection},${latencyDetectionToRetrieval},${latencyRetrievalToSend},${totalBuyLatency},${latencyBuyToSell},${totalLatency}\n`;
   
-  // Function to determine the amount of tokens bought from the transaction
-  async function getAmountBoughtFromTransaction(
-    transaction: any,
-    mintPublicKey: PublicKey,
-    userPublicKey: string
-  ): Promise<bigint | null> {
-    try {
-      const preTokenBalances = transaction.meta?.preTokenBalances || [];
-      const postTokenBalances = transaction.meta?.postTokenBalances || [];
-  
-      // Find the token balance entries for the mint and user
-      const preBalanceEntry = preTokenBalances.find(
-        (balance: any) =>
-          balance.mint === mintPublicKey.toBase58() &&
-          balance.owner === userPublicKey
-      );
-      const postBalanceEntry = postTokenBalances.find(
-        (balance: any) =>
-          balance.mint === mintPublicKey.toBase58() &&
-          balance.owner === userPublicKey
-      );
-  
-      const preBalance = BigInt(preBalanceEntry?.uiTokenAmount.amount || "0");
-      const postBalance = BigInt(postBalanceEntry?.uiTokenAmount.amount || "0");
-  
-      const amountBought = postBalance - preBalance;
-  
-      if (amountBought <= 0n) {
-        console.error("Amount bought is zero or negative.");
-        return null;
-      }
-  
-      return amountBought;
-    } catch (error) {
-      console.error("Error parsing transaction for amount bought:", error);
-      return null;
-    }
+  // Check if file exists
+  if (!fs.existsSync(logFilePath)) { // Create the file and write the headers
+    fs.writeFileSync(logFilePath, headers);
   }
-  
-  // Function to get token decimals
-  async function getTokenDecimals(
-    connection: Connection,
-    mintPublicKey: PublicKey
-  ): Promise<number | null> {
-    try {
-      const mintInfo = await getMint(connection, mintPublicKey);
-      return mintInfo.decimals;
-    } catch (error) {
-      console.error(
-        `Error getting decimals for token ${mintPublicKey.toBase58()}:`,
-        error
-      );
-      return null;
-    }
+
+  fs.appendFileSync(logFilePath, logEntry); // Append the log entry to the file
+};
+
+// Main function to start monitoring
+const startMonitoringPumpFun = async (): Promise<void> => {
+  try {
+    connection.onLogs(
+      programId,
+      async (logs: Logs) => {
+        try {
+          if (
+            logs.logs &&
+            logs.logs.some((log: string) =>
+              log.includes("Program log: Instruction: InitializeMint2") // Check if log includes token mint instruction
+            )
+          ) {
+            const detectedTime = Date.now();
+            console.log("Log signature:", logs.signature);
+
+            const tx = await aggressivelyGetTransaction(logs.signature);
+
+            if (tx) { // Retrieving necessary addresses from tx
+              const mintTime = tx.blockTime ? tx.blockTime * 1000 : null; // Convert to milliseconds
+              const mintAddress =
+                tx.transaction?.message?.accountKeys?.[1]?.pubkey?.toBase58();
+              const bondCurveAddress =
+                tx.transaction?.message?.accountKeys?.[3]?.pubkey?.toBase58();
+              const associatedBondCurveAddress =
+                tx.transaction?.message?.accountKeys?.[4]?.pubkey?.toBase58();
+              const mintRetrievalTime = Date.now();
+
+              // Calculate the latency from mint to retrieval
+              const mintRetrievalLatency = mintTime ? mintRetrievalTime - mintTime : null;
+
+              // Check if latency is within acceptable range
+              if (
+                mintTime &&
+                mintAddress &&
+                bondCurveAddress &&
+                associatedBondCurveAddress &&
+                mintRetrievalLatency !== null &&
+                mintRetrievalLatency < 1500 // 1500 milliseconds threshold
+              ) {
+                console.log(`Latency from mint to retrieval: ${mintRetrievalLatency}ms`);
+                console.log(`Attempting to buy token...`);
+
+                try {
+                  // Create the transaction
+                  const transaction = new Transaction();
+
+                  // Derive the associated token account for the user
+                  const associatedTokenAccount = await getAssociatedTokenAddress(
+                    new PublicKey(mintAddress),
+                    userKeypair.publicKey
+                  );
+
+                  // Creating associated token account
+                  console.log("Creating associated token account...");
+                  const createATAIx = createAssociatedTokenAccountInstruction(
+                    userKeypair.publicKey,        // payer
+                    associatedTokenAccount,       // associated token account to create
+                    userKeypair.publicKey,        // owner of the account
+                    new PublicKey(mintAddress)    // mint
+                  );
+                  transaction.add(createATAIx);
+
+                  // Set maxSolCost to 0.0001 SOL in lamports
+                  const maxSolCost = 0.0001 * LAMPORTS_PER_SOL; // 0.0001 SOL in lamports
+
+                  // Set amount to a large number scaled for 6 decimals, max price per token = 3 * 10^-8
+                  const maxPricePerTokenLamports = 0.00000003 * LAMPORTS_PER_SOL;
+                  const tokensToBuy = Math.floor(maxSolCost / maxPricePerTokenLamports);
+                  const amount = new anchor.BN(tokensToBuy * 1e6); // If price is higher, transaction will fail due to slippage
+
+                  // Encode instruction data using the imported IDL
+                  const instructionCoder = new anchor.BorshInstructionCoder(idl as Idl);
+                  const data = instructionCoder.encode("buy", {
+                    amount: amount,
+                    maxSolCost: new anchor.BN(maxSolCost),
+                  });
+
+                  // Create the buy instruction
+                  const buyInstruction = new TransactionInstruction({
+                    keys: [
+                      { pubkey: PUMP_GLOBAL, isSigner: false, isWritable: false },
+                      { pubkey: PUMP_FEE, isSigner: false, isWritable: true },
+                      { pubkey: new PublicKey(mintAddress), isSigner: false, isWritable: false },
+                      { pubkey: new PublicKey(bondCurveAddress), isSigner: false, isWritable: true },
+                      { pubkey: new PublicKey(associatedBondCurveAddress), isSigner: false, isWritable: true },
+                      { pubkey: associatedTokenAccount, isSigner: false, isWritable: true },
+                      { pubkey: userKeypair.publicKey, isSigner: true, isWritable: true },
+                      { pubkey: SYSTEM_PROGRAM, isSigner: false, isWritable: false },
+                      { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+                      { pubkey: SYSTEM_RENT, isSigner: false, isWritable: false },
+                      { pubkey: PUMP_EVENT_AUTHORITY, isSigner: false, isWritable: false },
+                      { pubkey: PUMP_PROGRAM, isSigner: false, isWritable: false },
+                    ],
+                    programId: programId,
+                    data: data,
+                  });
+
+                  transaction.add(buyInstruction);
+
+
+                  // Send the buy transaction
+                  const sendBuyTime = Date.now();
+                  const buySignature = await connection.sendTransaction(
+                    transaction,
+                    [userKeypair],
+                    {skipPreflight: true, maxRetries: 6}
+                  );
+
+                  console.log(`Buy Transaction sent: ${buySignature}`);
+                  const buyTransactionLink = `https://solscan.io/tx/${buySignature}`;
+                  console.log(buyTransactionLink);
+
+                  // Proceed to send the sell transaction immediately after the buy transaction
+                  console.log("Attempting to sell tokens...");
+
+                  // Create the sell transaction
+                  const sellTransaction = new Transaction();
+
+                  // Encode instruction data for sell
+                  const sellData = instructionCoder.encode("sell", {
+                    amount: amount, // Sell the same amount as bought
+                    minSolOutput: new anchor.BN(0), // Accept any amount of SOL
+                  });
+
+                  // Create the sell instruction
+                  const sellInstruction = new TransactionInstruction({
+                    keys: [
+                      { pubkey: PUMP_GLOBAL, isSigner: false, isWritable: false },
+                      { pubkey: PUMP_FEE, isSigner: false, isWritable: true },
+                      { pubkey: new PublicKey(mintAddress), isSigner: false, isWritable: false },
+                      { pubkey: new PublicKey(bondCurveAddress), isSigner: false, isWritable: true },
+                      { pubkey: new PublicKey(associatedBondCurveAddress), isSigner: false, isWritable: true },
+                      { pubkey: associatedTokenAccount, isSigner: false, isWritable: true },
+                      { pubkey: userKeypair.publicKey, isSigner: true, isWritable: true },
+                      { pubkey: SYSTEM_PROGRAM, isSigner: false, isWritable: false },
+                      { pubkey: ASSOCIATED_TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+                      { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+                      { pubkey: PUMP_EVENT_AUTHORITY, isSigner: false, isWritable: false },
+                      { pubkey: PUMP_PROGRAM, isSigner: false, isWritable: false },
+                    ],
+                    programId: programId,
+                    data: sellData,
+                  });
+
+                  sellTransaction.add(sellInstruction);
+
+                  // Send the sell transaction
+                  const sendSellTime = Date.now();
+                  const sellSignature = await connection.sendTransaction(
+                    sellTransaction,
+                    [userKeypair],
+                    {skipPreflight: true, maxRetries: 6}
+                  );
+
+                  console.log(`Sell Transaction sent: ${sellSignature}`);
+                  const sellTransactionLink = `https://solscan.io/tx/${sellSignature}`;
+                  console.log(sellTransactionLink);
+
+                  // Compute latencies
+                  const latencyMintToDetection = detectedTime - mintTime;
+                  const latencyDetectionToRetrieval = mintRetrievalTime - detectedTime;
+                  const latencyRetrievalToSend = sendBuyTime - mintRetrievalTime;
+                  const totalBuyLatency = sendBuyTime - mintTime;
+                  const latencyBuyToSell = sendSellTime - sendBuyTime;
+                  const totalLatency = sendSellTime - mintTime;
+
+                  // Log the latencies
+                  console.log(`Mint to Detection Latency: ${latencyMintToDetection}ms`);
+                  console.log(`Detection to Retrieval Latency: ${latencyDetectionToRetrieval}ms`);
+                  console.log(`Retrieval to Send (Buy) Latency: ${latencyRetrievalToSend}ms`);
+                  console.log(`Total Buy Latency: ${totalBuyLatency}ms`);
+                  console.log(`Latency Buy to Sell: ${latencyBuyToSell}ms`);
+                  console.log(`Total Latency: ${totalLatency}ms`);
+
+                  // Log the transactions with latencies 
+                  logTransaction(
+                    logFilePath, 
+                    mintAddress,
+                    buyTransactionLink,
+                    sellTransactionLink,
+                    latencyMintToDetection,
+                    latencyDetectionToRetrieval,
+                    latencyRetrievalToSend,
+                    totalBuyLatency,
+                    latencyBuyToSell,
+                    totalLatency
+                  );
+
+                } catch (error) {
+                  console.error("Failed to send transactions:", error);
+                }
+              } else {
+                console.log(
+                  `Latency too high (${mintRetrievalLatency}ms). Skipping buy.`
+                );
+              }
+            } else {
+              console.log(
+                "Failed to retrieve transaction data after maximum attempts."
+              );
+            }
+          }
+        } catch (error) {
+          console.error("Error processing log:", error);
+        }
+      },
+      "processed"
+    );
+
+    console.log("Monitoring PumpFun program for new mints...");
+  } catch (error) {
+    console.error("Error setting up log listener:", error);
   }
-  
-  // Function to get the current price of a token in SOL per token using getSellPrice
-  async function getTokenPrice(
-    sdk: PumpFunSDK,
-    connection: Connection,
-    mintPublicKey: PublicKey
-  ): Promise<number | null> {
-    try {
-      // Get token decimals
-      const decimals = await getTokenDecimals(connection, mintPublicKey);
-      if (decimals === null) {
-        console.log(
-          `Could not retrieve decimals for token ${mintPublicKey.toBase58()}.`
-        );
-        return null;
-      }
-  
-      // Define the amount to sell (e.g., 1 token unit adjusted for decimals)
-      const amountToSell = BigInt(1 * 10 ** decimals);
-  
-      // Fetch the bonding curve account
-      const bondingCurveAccount = await sdk.getBondingCurveAccount(mintPublicKey);
-  
-      if (!bondingCurveAccount) {
-        console.error("Bonding curve account not found.");
-        return null;
-      }
-  
-      // Calculate the sell price using getSellPrice
-      const feeBasisPoints = 0n; // No fee for price calculation
-      const solReceived = bondingCurveAccount.getSellPrice(
-        amountToSell,
-        feeBasisPoints
-      );
-  
-      // Convert lamports to SOL and calculate price per token
-      const priceInSOL = Number(solReceived) / LAMPORTS_PER_SOL / Number(amountToSell);
-  
-      // Adjust price back to per whole token
-      const pricePerToken = priceInSOL * 10 ** decimals;
-  
-      return pricePerToken;
-    } catch (error) {
-      console.error(
-        `Error getting price for token ${mintPublicKey.toBase58()}:`,
-        error
-      );
-      return null;
-    }
-  }
-  
-  // Function to sell a token
-  async function sellToken(token: TradedToken) {
-    try {
-      const mintPublicKey = new PublicKey(token.mintAddress);
-  
-      const txResult = await sdk.sell(
-        userKeypair,
-        mintPublicKey,
-        token.amountBought, // Sell the amount bought
-        SLIPPAGE,
-        PRIORITY_FEE
-      );
-      console.log(
-        `Successfully sold token ${token.mintAddress}. Transaction Result:`,
-        txResult
-      );
-  
-      // Remove the token from tradedTokens
-      tradedTokens = tradedTokens.filter(
-        (t) => t.mintAddress !== token.mintAddress
-      );
-    } catch (error) {
-      console.error(`Error selling token ${token.mintAddress}:`, error);
-    }
-  }
-  
-  // Function to check the price of a token and decide whether to sell
-  async function checkTokenPrice(token: TradedToken) {
-    const mintPublicKey = new PublicKey(token.mintAddress);
-    const currentPrice = await getTokenPrice(sdk, connection, mintPublicKey);
-  
-    if (currentPrice !== null) {
-      const priceChangePercentage =
-        ((currentPrice - token.buyPrice) / token.buyPrice) * 100;
-  
-      console.log(
-        `Token ${token.mintAddress}: Buy Price = ${token.buyPrice.toFixed(
-          6
-        )} SOL, Current Price = ${currentPrice.toFixed(
-          6
-        )} SOL, Change = ${priceChangePercentage.toFixed(2)}%`
-      );
-  
-      if (priceChangePercentage >= TAKE_PROFIT_PERCENTAGE) {
-        console.log(
-          `Token ${token.mintAddress} reached take profit target. Selling...`
-        );
-        // Sell the token
-        await sellToken(token);
-      } else if (priceChangePercentage <= -STOP_LOSS_PERCENTAGE) {
-        console.log(
-          `Token ${token.mintAddress} reached stop loss target. Selling...`
-        );
-        // Sell the token
-        await sellToken(token);
-      }
-    }
-  }
-  
-  // Function to monitor tokens for profit/loss targets
-  function monitorTokens() {
-    setInterval(async () => {
-      const tokensToMonitor = [...tradedTokens];
-      const numTokens = tokensToMonitor.length;
-  
-      if (numTokens === 0) {
-        // No tokens to monitor, skip this iteration
-        return;
-      }
-  
-      // Calculate the minimum interval per token to stay within rate limits
-      const maxRpcRequestsPerSecond = 8; // Using 8 for safety margin
-      const intervalPerToken = 1000 / maxRpcRequestsPerSecond; // in milliseconds
-  
-      for (const token of tokensToMonitor) {
-        await checkTokenPrice(token);
-        // Wait for intervalPerToken milliseconds before checking the next token
-        await new Promise((resolve) => setTimeout(resolve, intervalPerToken));
-      }
-    }, 0); // Start immediately without a fixed interval
-  }
-  
-  // Start monitoring tokens
-  monitorTokens();
-  
-  // Start monitoring for token mints
-  startMonitoringTokenMints();
-  
+};
+
+// Start monitoring
+startMonitoringPumpFun();
