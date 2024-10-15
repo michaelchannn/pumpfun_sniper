@@ -1,4 +1,3 @@
-// Import packages 
 import {
   PublicKey,
   Connection,
@@ -9,11 +8,12 @@ import {
   TransactionInstruction,
   SystemProgram,
   SYSVAR_RENT_PUBKEY,
+  ComputeBudgetProgram,
 } from "@solana/web3.js";
 import bs58 from "bs58";
 import { Idl } from "@project-serum/anchor";
 import * as anchor from "@project-serum/anchor";
-import idl from "./pump_fun_idl.json"; 
+import idl from "./pump_fun_idl.json";
 import {
   TOKEN_PROGRAM_ID,
   ASSOCIATED_TOKEN_PROGRAM_ID,
@@ -42,16 +42,189 @@ const LAMPORTS_PER_SOL = 1_000_000_000;
 
 // Helius RPC endpoint to make connection
 const connection = new Connection(
-  "HELIUS_ENDPOINT"
+  "HELIUS_API_KEY"
 );
 
 // User-specified folder path for logs
-const logFolderPath = '/Users/Logs'; // Replace with your desired folder path
+const logFolderPath = "/Users/Logs"; // Replace with your desired folder path
+
+// Ensure the log directory exists
+if (!fs.existsSync(logFolderPath)) {
+  fs.mkdirSync(logFolderPath, { recursive: true });
+}
 
 // log file paths
 const timestamp = new Date().toISOString().replace(/[:.]/g, '-'); 
 const logFileName = `transaction_logs_${timestamp}.csv`;
 const logFilePath = path.join(logFolderPath, logFileName);
+
+// Function to escape and quote CSV fields
+const escapeCSV = (field: string): string => {
+  if (field.includes('"')) {
+    field = field.replace(/"/g, '""'); // Escape existing double quotes
+  }
+  return `"${field}"`; // Enclose the field in double quotes
+};
+
+
+// Function to create compute unit price instructions with varying priority fees
+const createComputeUnitPriceInstructions = (numVariations: number, basePrice: number): TransactionInstruction[] => {
+  const instructions: TransactionInstruction[] = [];
+  for (let i = 0; i < numVariations; i++) {
+    const computePriceIx = ComputeBudgetProgram.setComputeUnitPrice({
+      microLamports: basePrice + i * 1000
+    });
+    instructions.push(computePriceIx);
+  }
+  return instructions;
+};
+
+// Function to spam buy transactions with varying priority fees
+const spamBuyTransactions = async (
+  mintAddress: string,
+  bondCurveAddress: string,
+  associatedBondCurveAddress: string,
+  numSpams: number,
+  basePrice: number
+): Promise<string[]> => {
+  const computeInstructions = createComputeUnitPriceInstructions(numSpams, basePrice);
+  const buySignatures: string[] = [];
+
+  for (const computeIx of computeInstructions) {
+    try {
+      const transaction = new Transaction().add(computeIx);
+
+      // Derive associated token account for user
+      const associatedTokenAccount = await getAssociatedTokenAddress(
+        new PublicKey(mintAddress),
+        userKeypair.publicKey
+      );
+
+      // Create associated token account instruction
+      const createATAIx = createAssociatedTokenAccountInstruction(
+        userKeypair.publicKey,
+        associatedTokenAccount,
+        userKeypair.publicKey,
+        new PublicKey(mintAddress)
+      );
+
+      transaction.add(createATAIx);
+
+      // Set maxSolCost to 0.0001 SOL in lamports
+      const maxSolCost = 0.0001 * LAMPORTS_PER_SOL;
+
+      // Set amount to a large number scaled for 6 decimals, max price per token = 3 * 10^-8
+      const maxPricePerTokenLamports = 0.00000003 * LAMPORTS_PER_SOL;
+      const tokensToBuy = Math.floor(maxSolCost / maxPricePerTokenLamports);
+      const amount = new anchor.BN(tokensToBuy * 1e6);
+
+      // Encode instruction data using the imported IDL
+      const instructionCoder = new anchor.BorshInstructionCoder(idl as Idl);
+      const data = instructionCoder.encode("buy", {
+        amount: amount,
+        maxSolCost: new anchor.BN(maxSolCost),
+      });
+
+      // Create the buy instruction
+      const buyInstruction = new TransactionInstruction({
+        keys: [
+          { pubkey: PUMP_GLOBAL, isSigner: false, isWritable: false },
+          { pubkey: PUMP_FEE, isSigner: false, isWritable: true },
+          { pubkey: new PublicKey(mintAddress), isSigner: false, isWritable: false },
+          { pubkey: new PublicKey(bondCurveAddress), isSigner: false, isWritable: true },
+          { pubkey: new PublicKey(associatedBondCurveAddress), isSigner: false, isWritable: true },
+          { pubkey: associatedTokenAccount, isSigner: false, isWritable: true },
+          { pubkey: userKeypair.publicKey, isSigner: true, isWritable: true },
+          { pubkey: SYSTEM_PROGRAM, isSigner: false, isWritable: false },
+          { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+          { pubkey: SYSTEM_RENT, isSigner: false, isWritable: false },
+          { pubkey: PUMP_EVENT_AUTHORITY, isSigner: false, isWritable: false },
+          { pubkey: PUMP_PROGRAM, isSigner: false, isWritable: false },
+        ],
+        programId: programId,
+        data: data,
+      });
+
+      transaction.add(buyInstruction);
+
+      // Send the transaction
+      const signature = await connection.sendTransaction(transaction, [userKeypair], { skipPreflight: true });
+      console.log(`Buy Transaction sent: ${signature}`);
+      buySignatures.push(signature);
+    } catch (error) {
+      console.error("Failed to send buy transaction:", error);
+    }
+  }
+
+  return buySignatures;
+};
+
+// Function to spam sell transactions with varying priority fees
+const spamSellTransactions = async (
+  mintAddress: string,
+  bondCurveAddress: string,
+  associatedBondCurveAddress: string,
+  numSpams: number,
+  basePrice: number
+): Promise<string[]> => {
+  const computeInstructions = createComputeUnitPriceInstructions(numSpams, basePrice);
+  const sellSignatures: string[] = [];
+
+  // Calculate the fixed number of tokens to sell (same as in buy function)
+  const maxSolCost = 0.0001 * LAMPORTS_PER_SOL;
+  const maxPricePerTokenLamports = 0.00000003 * LAMPORTS_PER_SOL;
+  const tokensToSell = Math.floor(maxSolCost / maxPricePerTokenLamports);
+
+  for (const computeIx of computeInstructions) {
+    try {
+      const transaction = new Transaction().add(computeIx);
+
+      // Encode instruction data for sell
+      const instructionCoder = new anchor.BorshInstructionCoder(idl as Idl);
+      const sellData = instructionCoder.encode("sell", {
+        amount: new anchor.BN(tokensToSell * 1e6),
+        minSolOutput: new anchor.BN(0), // Accept any amount of SOL
+      });
+
+      // Derive associated token account for user
+      const associatedTokenAccount = await getAssociatedTokenAddress(
+        new PublicKey(mintAddress),
+        userKeypair.publicKey
+      );
+
+      // Create the sell instruction
+      const sellInstruction = new TransactionInstruction({
+        keys: [
+          { pubkey: PUMP_GLOBAL, isSigner: false, isWritable: false },
+          { pubkey: PUMP_FEE, isSigner: false, isWritable: true },
+          { pubkey: new PublicKey(mintAddress), isSigner: false, isWritable: false },
+          { pubkey: new PublicKey(bondCurveAddress), isSigner: false, isWritable: true },
+          { pubkey: new PublicKey(associatedBondCurveAddress), isSigner: false, isWritable: true },
+          { pubkey: associatedTokenAccount, isSigner: false, isWritable: true },
+          { pubkey: userKeypair.publicKey, isSigner: true, isWritable: true },
+          { pubkey: SYSTEM_PROGRAM, isSigner: false, isWritable: false },
+          { pubkey: ASSOCIATED_TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+          { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+          { pubkey: PUMP_EVENT_AUTHORITY, isSigner: false, isWritable: false },
+          { pubkey: PUMP_PROGRAM, isSigner: false, isWritable: false },
+        ],
+        programId: programId,
+        data: sellData,
+      });
+
+      transaction.add(sellInstruction);
+
+      // Send the sell transaction
+      const signature = await connection.sendTransaction(transaction, [userKeypair], { skipPreflight: true });
+      console.log(`Sell Transaction sent: ${signature}`);
+      sellSignatures.push(signature);
+    } catch (error) {
+      console.error("Failed to send sell transaction:", error);
+    }
+  }
+
+  return sellSignatures;
+};
 
 // Function to aggressively fetch a transaction
 const aggressivelyGetTransaction = async (
@@ -87,27 +260,35 @@ const aggressivelyGetTransaction = async (
 };
 
 // Function to write logs to a CSV file
-const logTransaction = (
+const logTransactionToCSV = (
   logFilePath: string, 
   mintAddress: string,
-  buyTransactionLink: string,
-  sellTransactionLink: string,
+  buyTransactionLinks: string,
+  sellTransactionLinks: string,
   latencyMintToDetection: number,
   latencyDetectionToRetrieval: number,
-  latencyRetrievalToSend: number,
+  latencyRetrievalToBuyStart: number,
   totalBuyLatency: number,
-  latencyBuyToSell: number,
-  totalLatency: number
+  latencyBuySpam: number,
+  latencySellSpam: number
 ) => {
-  const headers = 'Mint Address,Buy Transaction Link,Sell Transaction Link,Mint to Detection Latency (ms),Detection to Retrieval Latency (ms),Retrieval to Send (Buy) Latency (ms),Total Buy Latency (ms),Latency Buy to Sell (ms),Total Latency (ms)\n';
-  const logEntry = `${mintAddress},${buyTransactionLink},${sellTransactionLink},${latencyMintToDetection},${latencyDetectionToRetrieval},${latencyRetrievalToSend},${totalBuyLatency},${latencyBuyToSell},${totalLatency}\n`;
+  const headers = 'Mint Address,Buy Transaction Links,Sell Transaction Links,Mint to Detection Latency (ms),Detection to Retrieval Latency (ms),Retrieval to Buy Start Latency (ms),Total Buy Latency (ms),Buy Spam Duration (ms),Sell Spam Duration (ms)\n';
   
-  // Check if file exists
-  if (!fs.existsSync(logFilePath)) { // Create the file and write the headers
-    fs.writeFileSync(logFilePath, headers);
+  // Check if the log file exists; if not, write headers
+  if (!fs.existsSync(logFilePath)) {
+    fs.writeFileSync(logFilePath, headers, { flag: 'w' });
   }
 
-  fs.appendFileSync(logFilePath, logEntry); // Append the log entry to the file
+  // Escape and quote the necessary fields
+  const escapedMintAddress = escapeCSV(mintAddress);
+  const escapedBuyLinks = escapeCSV(buyTransactionLinks);
+  const escapedSellLinks = escapeCSV(sellTransactionLinks);
+  
+  // Create the log entry
+  const logEntry = `${escapedMintAddress},${escapedBuyLinks},${escapedSellLinks},${latencyMintToDetection},${latencyDetectionToRetrieval},${latencyRetrievalToBuyStart},${totalBuyLatency},${latencyBuySpam},${latencySellSpam}\n`;
+  
+  // Append the log entry
+  fs.appendFileSync(logFilePath, logEntry, { flag: 'a' });
 };
 
 // Main function to start monitoring
@@ -120,7 +301,7 @@ const startMonitoringPumpFun = async (): Promise<void> => {
           if (
             logs.logs &&
             logs.logs.some((log: string) =>
-              log.includes("Program log: Instruction: InitializeMint2") // Check if log includes token mint instruction
+              log.includes("Program log: Instruction: InitializeMint2")
             )
           ) {
             const detectedTime = Date.now();
@@ -128,189 +309,72 @@ const startMonitoringPumpFun = async (): Promise<void> => {
 
             const tx = await aggressivelyGetTransaction(logs.signature);
 
-            if (tx) { // Retrieving necessary addresses from tx
-              const mintTime = tx.blockTime ? tx.blockTime * 1000 : null; // Convert to milliseconds
-              const mintAddress =
-                tx.transaction?.message?.accountKeys?.[1]?.pubkey?.toBase58();
-              const bondCurveAddress =
-                tx.transaction?.message?.accountKeys?.[3]?.pubkey?.toBase58();
-              const associatedBondCurveAddress =
-                tx.transaction?.message?.accountKeys?.[4]?.pubkey?.toBase58();
+            if (tx) {
+              const mintTime = tx.blockTime ? tx.blockTime * 1000 : null;
+              const mintAddress = tx.transaction?.message?.accountKeys?.[1]?.pubkey?.toBase58();
+              const bondCurveAddress = tx.transaction?.message?.accountKeys?.[3]?.pubkey?.toBase58();
+              const associatedBondCurveAddress = tx.transaction?.message?.accountKeys?.[4]?.pubkey?.toBase58();
               const mintRetrievalTime = Date.now();
 
-              // Calculate the latency from mint to retrieval
               const mintRetrievalLatency = mintTime ? mintRetrievalTime - mintTime : null;
 
-              // Check if latency is within acceptable range
               if (
                 mintTime &&
                 mintAddress &&
                 bondCurveAddress &&
                 associatedBondCurveAddress &&
                 mintRetrievalLatency !== null &&
-                mintRetrievalLatency < 1500 // 1500 milliseconds threshold
+                mintRetrievalLatency < 1500
               ) {
                 console.log(`Latency from mint to retrieval: ${mintRetrievalLatency}ms`);
-                console.log(`Attempting to buy token...`);
+                console.log(`Spamming buy transactions...`);
 
-                try {
-                  // Create the transaction
-                  const transaction = new Transaction();
+                const buyStartTime = Date.now();
+                const buySignatures = await spamBuyTransactions(mintAddress, bondCurveAddress, associatedBondCurveAddress, 5, 1000);
+                const buyEndTime = Date.now();
 
-                  // Derive the associated token account for the user
-                  const associatedTokenAccount = await getAssociatedTokenAddress(
-                    new PublicKey(mintAddress),
-                    userKeypair.publicKey
-                  );
+                console.log(`Buy transactions sent. Waiting 2 seconds before selling...`);
+                await new Promise(resolve => setTimeout(resolve, 2000));
 
-                  // Creating associated token account
-                  console.log("Creating associated token account...");
-                  const createATAIx = createAssociatedTokenAccountInstruction(
-                    userKeypair.publicKey,        // payer
-                    associatedTokenAccount,       // associated token account to create
-                    userKeypair.publicKey,        // owner of the account
-                    new PublicKey(mintAddress)    // mint
-                  );
-                  transaction.add(createATAIx);
+                console.log(`Spamming sell transactions...`);
+                const sellStartTime = Date.now();
+                const sellSignatures = await spamSellTransactions(mintAddress, bondCurveAddress, associatedBondCurveAddress, 5, 1000);
+                const sellEndTime = Date.now();
 
-                  // Set maxSolCost to 0.0001 SOL in lamports
-                  const maxSolCost = 0.0001 * LAMPORTS_PER_SOL; // 0.0001 SOL in lamports
+                // Calculate latencies
+                const latencyMintToDetection = detectedTime - mintTime;
+                const latencyDetectionToRetrieval = mintRetrievalTime - detectedTime;
+                const latencyRetrievalToBuyStart = buyStartTime - mintRetrievalTime;
+                const totalBuyLatency = buyStartTime - mintTime; // Total time from mint to buy start
+                const latencyBuySpam = buyEndTime - buyStartTime;
+                const latencySellSpam = sellEndTime - sellStartTime;
 
-                  // Set amount to a large number scaled for 6 decimals, max price per token = 3 * 10^-8
-                  const maxPricePerTokenLamports = 0.00000003 * LAMPORTS_PER_SOL;
-                  const tokensToBuy = Math.floor(maxSolCost / maxPricePerTokenLamports);
-                  const amount = new anchor.BN(tokensToBuy * 1e6); // If price is higher, transaction will fail due to slippage
+                // Construct Solscan links
+                const buyTransactionLinks = buySignatures.map(sig => `https://solscan.io/tx/${sig}`).join('; ');
+                const sellTransactionLinks = sellSignatures.map(sig => `https://solscan.io/tx/${sig}`).join('; ');
 
-                  // Encode instruction data using the imported IDL
-                  const instructionCoder = new anchor.BorshInstructionCoder(idl as Idl);
-                  const data = instructionCoder.encode("buy", {
-                    amount: amount,
-                    maxSolCost: new anchor.BN(maxSolCost),
-                  });
-
-                  // Create the buy instruction
-                  const buyInstruction = new TransactionInstruction({
-                    keys: [
-                      { pubkey: PUMP_GLOBAL, isSigner: false, isWritable: false },
-                      { pubkey: PUMP_FEE, isSigner: false, isWritable: true },
-                      { pubkey: new PublicKey(mintAddress), isSigner: false, isWritable: false },
-                      { pubkey: new PublicKey(bondCurveAddress), isSigner: false, isWritable: true },
-                      { pubkey: new PublicKey(associatedBondCurveAddress), isSigner: false, isWritable: true },
-                      { pubkey: associatedTokenAccount, isSigner: false, isWritable: true },
-                      { pubkey: userKeypair.publicKey, isSigner: true, isWritable: true },
-                      { pubkey: SYSTEM_PROGRAM, isSigner: false, isWritable: false },
-                      { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
-                      { pubkey: SYSTEM_RENT, isSigner: false, isWritable: false },
-                      { pubkey: PUMP_EVENT_AUTHORITY, isSigner: false, isWritable: false },
-                      { pubkey: PUMP_PROGRAM, isSigner: false, isWritable: false },
-                    ],
-                    programId: programId,
-                    data: data,
-                  });
-
-                  transaction.add(buyInstruction);
-
-
-                  // Send the buy transaction
-                  const sendBuyTime = Date.now();
-                  const buySignature = await connection.sendTransaction(
-                    transaction,
-                    [userKeypair],
-                    {skipPreflight: true, maxRetries: 6}
-                  );
-
-                  console.log(`Buy Transaction sent: ${buySignature}`);
-                  const buyTransactionLink = `https://solscan.io/tx/${buySignature}`;
-                  console.log(buyTransactionLink);
-
-                  // Proceed to send the sell transaction immediately after the buy transaction
-                  console.log("Attempting to sell tokens...");
-
-                  // Create the sell transaction
-                  const sellTransaction = new Transaction();
-
-                  // Encode instruction data for sell
-                  const sellData = instructionCoder.encode("sell", {
-                    amount: amount, // Sell the same amount as bought
-                    minSolOutput: new anchor.BN(0), // Accept any amount of SOL
-                  });
-
-                  // Create the sell instruction
-                  const sellInstruction = new TransactionInstruction({
-                    keys: [
-                      { pubkey: PUMP_GLOBAL, isSigner: false, isWritable: false },
-                      { pubkey: PUMP_FEE, isSigner: false, isWritable: true },
-                      { pubkey: new PublicKey(mintAddress), isSigner: false, isWritable: false },
-                      { pubkey: new PublicKey(bondCurveAddress), isSigner: false, isWritable: true },
-                      { pubkey: new PublicKey(associatedBondCurveAddress), isSigner: false, isWritable: true },
-                      { pubkey: associatedTokenAccount, isSigner: false, isWritable: true },
-                      { pubkey: userKeypair.publicKey, isSigner: true, isWritable: true },
-                      { pubkey: SYSTEM_PROGRAM, isSigner: false, isWritable: false },
-                      { pubkey: ASSOCIATED_TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
-                      { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
-                      { pubkey: PUMP_EVENT_AUTHORITY, isSigner: false, isWritable: false },
-                      { pubkey: PUMP_PROGRAM, isSigner: false, isWritable: false },
-                    ],
-                    programId: programId,
-                    data: sellData,
-                  });
-
-                  sellTransaction.add(sellInstruction);
-
-                  // Send the sell transaction
-                  const sendSellTime = Date.now();
-                  const sellSignature = await connection.sendTransaction(
-                    sellTransaction,
-                    [userKeypair],
-                    {skipPreflight: true, maxRetries: 6}
-                  );
-
-                  console.log(`Sell Transaction sent: ${sellSignature}`);
-                  const sellTransactionLink = `https://solscan.io/tx/${sellSignature}`;
-                  console.log(sellTransactionLink);
-
-                  // Compute latencies
-                  const latencyMintToDetection = detectedTime - mintTime;
-                  const latencyDetectionToRetrieval = mintRetrievalTime - detectedTime;
-                  const latencyRetrievalToSend = sendBuyTime - mintRetrievalTime;
-                  const totalBuyLatency = sendBuyTime - mintTime;
-                  const latencyBuyToSell = sendSellTime - sendBuyTime;
-                  const totalLatency = sendSellTime - mintTime;
-
-                  // Log the latencies
-                  console.log(`Mint to Detection Latency: ${latencyMintToDetection}ms`);
-                  console.log(`Detection to Retrieval Latency: ${latencyDetectionToRetrieval}ms`);
-                  console.log(`Retrieval to Send (Buy) Latency: ${latencyRetrievalToSend}ms`);
-                  console.log(`Total Buy Latency: ${totalBuyLatency}ms`);
-                  console.log(`Latency Buy to Sell: ${latencyBuyToSell}ms`);
-                  console.log(`Total Latency: ${totalLatency}ms`);
-
-                  // Log the transactions with latencies 
-                  logTransaction(
-                    logFilePath, 
-                    mintAddress,
-                    buyTransactionLink,
-                    sellTransactionLink,
-                    latencyMintToDetection,
-                    latencyDetectionToRetrieval,
-                    latencyRetrievalToSend,
-                    totalBuyLatency,
-                    latencyBuyToSell,
-                    totalLatency
-                  );
-
-                } catch (error) {
-                  console.error("Failed to send transactions:", error);
-                }
-              } else {
-                console.log(
-                  `Latency too high (${mintRetrievalLatency}ms). Skipping buy.`
+                // Log the transactions and latencies
+                logTransactionToCSV(
+                  logFilePath,
+                  mintAddress,
+                  buyTransactionLinks,
+                  sellTransactionLinks,
+                  latencyMintToDetection,
+                  latencyDetectionToRetrieval,
+                  latencyRetrievalToBuyStart,
+                  totalBuyLatency,
+                  latencyBuySpam,
+                  latencySellSpam
                 );
+
+                console.log(`Total buy latency: ${totalBuyLatency}ms`);
+                console.log(`Buy spam duration: ${latencyBuySpam}ms`);
+                console.log(`Sell spam duration: ${latencySellSpam}ms`);
+              } else {
+                console.log(`Latency too high (${mintRetrievalLatency}ms). Skipping transactions.`);
               }
             } else {
-              console.log(
-                "Failed to retrieve transaction data after maximum attempts."
-              );
+              console.log("Failed to retrieve transaction data after maximum attempts.");
             }
           }
         } catch (error) {
